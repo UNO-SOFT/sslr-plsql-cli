@@ -1,0 +1,17 @@
+[Unit]
+Description=SSLR PLSQL parser
+After=networking.target
+
+# https://bugzilla.redhat.com/show_bug.cgi?id=1781506
+[Service]
+Type=simple
+Restart=always
+# https://access.redhat.com/documentation/en-us/red_hat_enterprise_linux_atomic_host/7/html/managing_containers/running_containers_as_systemd_services_with_podman
+ExecStartPre=-/usr/bin/podman stop -t 30 sslr_server
+ExecStartPre=-/bin/sh -c "if ! /usr/bin/podman ps -a -f name=sslr_server | fgrep -q sslr_server; then echo 'START'; /usr/bin/podman run -d --name sslr_server -p 8003:8003 tgulacsi/sslr -port 8003; fi"
+ExecStart=/usr/bin/podman start -a sslr_server
+ExecStop=/usr/bin/podman stop -t 3 sslr_server
+#ExecStopPost=-/usr/bin/podman rm -f sslr_server
+
+[Install]
+WantedBy=multi-user.target
