@@ -17,17 +17,24 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/tgulacsi/go/iohlp"
 	"golang.org/x/text/encoding/charmap"
 )
 
-//go:embed sslr-plsql-toolkit-3.8.0.4948.jar
-var sslrJAR []byte
+var (
+	//go:embed sslr-plsql-toolkit-3.8.0.4948.jar
+	sslrJAR []byte
+	//go:embed commons-text-1.10.0.jar
+	commonsTextJAR []byte
+	//go:embed commons-lang3-3.12.0.jar
+	commonsLangJAR []byte
 
-//go:embed out/production/sslr/sslr/Main.class
-var mainClass []byte
+	//go:embed out/production/sslr/sslr/Main.class
+	mainClass []byte
+)
 
 func main() {
 	if err := Main(); err != nil {
@@ -126,9 +133,24 @@ func Main() error {
 	if err = os.MkdirAll(filepath.Join(dn, "sslr"), 0750); err != nil {
 		return err
 	}
-	jarFn := filepath.Join(dn, "sslr.jar")
-	if err = os.WriteFile(jarFn, sslrJAR, 0640); err != nil {
-		return err
+	var cp strings.Builder
+	cp.WriteString(filepath.Join(dn))
+	for _, jar := range []struct {
+		Data []byte
+		Name string
+	}{
+		{Data: sslrJAR, Name: "sslr.jar"},
+		{Data: commonsLangJAR, Name: "commons-lang3.jar"},
+		{Data: commonsTextJAR, Name: "commons-text.jar"},
+	} {
+		jarFn := filepath.Join(dn, jar.Name)
+		if err = os.WriteFile(jarFn, jar.Data, 0640); err != nil {
+			return err
+		}
+		if cp.Len() != 0 {
+			cp.WriteByte(':')
+		}
+		cp.WriteString(jarFn)
 	}
 	classFn := filepath.Join(dn, "sslr", "Main.class")
 	if err = os.WriteFile(classFn, mainClass, 0640); err != nil {
@@ -140,7 +162,7 @@ func Main() error {
 		cmd.Run()
 	}
 	var buf bytes.Buffer
-	cmd := exec.CommandContext(ctx, "java", "-cp", dn+":"+jarFn, "sslr.Main")
+	cmd := exec.CommandContext(ctx, "java", "-cp", cp.String(), "sslr.Main")
 	cmd.Stdin = stdin
 	cmd.Stdout, cmd.Stderr = &buf, os.Stderr
 	if done != nil {
@@ -191,8 +213,8 @@ func Main() error {
 				case "tokenColumn":
 					elt.Column, _ = strconv.Atoi(a.Value)
 				}
-				fmt.Println(elt)
 			}
+			fmt.Println(elt)
 		}
 	}
 	return nil
