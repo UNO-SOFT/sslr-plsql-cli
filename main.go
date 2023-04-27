@@ -3,8 +3,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	_ "embed"
+	"encoding/xml"
 	"flag"
 	"fmt"
 	"io"
@@ -14,6 +16,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"unicode/utf8"
 
 	"github.com/tgulacsi/go/iohlp"
@@ -34,6 +37,7 @@ func main() {
 
 func Main() error {
 	flagServer := flag.String("server", "http://localhost:8003", "SSLR server")
+	flagXML := flag.Bool("xml", false, "output raw XML")
 	flag.Parse()
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -135,9 +139,10 @@ func Main() error {
 		cmd.Stdout = os.Stdout
 		cmd.Run()
 	}
+	var buf bytes.Buffer
 	cmd := exec.CommandContext(ctx, "java", "-cp", dn+":"+jarFn, "sslr.Main")
 	cmd.Stdin = stdin
-	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	cmd.Stdout, cmd.Stderr = &buf, os.Stderr
 	if done != nil {
 		select {
 		case <-ctx.Done():
@@ -145,14 +150,50 @@ func Main() error {
 		case res, ok := <-done:
 			if ok && res.Err == nil {
 				log.Println("result from HTTP server")
-				_, err = cmd.Stdout.Write(res.Body)
-				return err
+				buf.Write(res.Body)
+			} else {
+				log.Printf("http error: %+v", res.Err)
 			}
-			log.Printf("http error: %+v", res.Err)
 		}
 	}
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("%q: %w", cmd.Args, err)
+	if buf.Len() == 0 {
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("%q: %w", cmd.Args, err)
+		}
+	}
+
+	if *flagXML {
+		_, err = os.Stdout.Write(buf.Bytes())
+		return err
+	}
+	dec := xml.NewDecoder(bytes.NewReader(buf.Bytes()))
+	dec.Strict = false
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return err
+		}
+		type element struct {
+			Name, Value  string
+			Line, Column int
+		}
+		if st, ok := tok.(xml.StartElement); ok {
+			elt := element{Name: st.Name.Local}
+			for _, a := range st.Attr {
+				switch a.Name.Local {
+				case "tokenValue":
+					elt.Value = a.Value
+				case "tokenLine":
+					elt.Line, _ = strconv.Atoi(a.Value)
+				case "tokenColumn":
+					elt.Column, _ = strconv.Atoi(a.Value)
+				}
+				fmt.Println(elt)
+			}
+		}
 	}
 	return nil
 }
