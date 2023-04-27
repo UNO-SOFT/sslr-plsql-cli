@@ -1,4 +1,5 @@
 #!/bin/sh
+set -eu
 dir="$(cd "$(dirname "$0")"; pwd)"
 JAVA=java
 if [ -n "${JAVA_HOME:-}" ]; then

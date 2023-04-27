@@ -14,8 +14,10 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"unicode/utf8"
 
 	"github.com/tgulacsi/go/iohlp"
+	"golang.org/x/text/encoding/charmap"
 )
 
 //go:embed sslr-plsql-toolkit-3.8.0.4948.jar
@@ -48,30 +50,67 @@ func Main() error {
 			stdin = fh
 		}
 	}
-	done := make(chan error, 1)
-	if *flagServer != "" {
-		sr, err := iohlp.MakeSectionReader(stdin, 1<<20)
-		if err != nil {
-			return err
+	sr, err := iohlp.MakeSectionReader(stdin, 1<<20)
+	if err != nil {
+		return err
+	}
+	stdin = io.NewSectionReader(sr, 0, sr.Size())
+	{
+		var invalid bool
+		r := io.NewSectionReader(sr, 0, sr.Size())
+		var a [4096]byte
+		for {
+			n, err := r.Read(a[:])
+			if n == 0 {
+				if err == io.EOF {
+					break
+				}
+				return err
+			}
+			b := a[:n]
+			for len(b) != 0 {
+				r, size := utf8.DecodeRune(b)
+				if size == 0 || r == utf8.RuneError {
+					invalid = true
+					break
+				}
+				b = b[size:]
+			}
 		}
-		stdin = io.NewSectionReader(sr, 0, sr.Size())
+
+		if invalid {
+			log.Println("input is not valid UTF-8, try to convert from ISO8859-2")
+			if stdin, err = iohlp.MakeSectionReader(charmap.ISO8859_2.NewDecoder().Reader(io.NewSectionReader(sr, 0, sr.Size())), 1<<20); err != nil {
+				return err
+			}
+		}
+	}
+
+	type result struct {
+		Body []byte
+		Err  error
+	}
+	var done chan result
+	if *flagServer != "" {
+		done = make(chan result, 1)
 		go func() {
 			defer close(done)
-			select {
-			case <-ctx.Done():
-				return
-			case done <- func() error {
-				resp, err := http.Post(*flagServer, "text/plain", io.NewSectionReader(sr, 0, sr.Size()))
+			done <- func() result {
+				req, err := http.NewRequestWithContext(ctx, "POST", *flagServer, io.NewSectionReader(sr, 0, sr.Size()))
 				if err != nil {
-					return fmt.Errorf("POST to %s: %w", *flagServer, err)
+					return result{Err: err}
+				}
+				resp, err := http.DefaultClient.Do(req)
+				if err != nil {
+					return result{Err: fmt.Errorf("POST to %s: %w", *flagServer, err)}
 				}
 				if resp.StatusCode > 399 {
-					return fmt.Errorf("POST to %s: %s", *flagServer, resp.Status)
+					return result{Err: fmt.Errorf("POST to %s: %s", *flagServer, resp.Status)}
 				}
-				io.Copy(os.Stdout, resp.Body)
-				return nil
-			}():
-			}
+				var res result
+				res.Body, res.Err = io.ReadAll(resp.Body)
+				return res
+			}()
 		}()
 	}
 
@@ -91,7 +130,7 @@ func Main() error {
 	if err = os.WriteFile(classFn, mainClass, 0640); err != nil {
 		return err
 	}
-	{
+	if false {
 		cmd := exec.CommandContext(ctx, "find", dn, "-ls")
 		cmd.Stdout = os.Stdout
 		cmd.Run()
@@ -99,14 +138,18 @@ func Main() error {
 	cmd := exec.CommandContext(ctx, "java", "-cp", dn+":"+jarFn, "sslr.Main")
 	cmd.Stdin = stdin
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case err = <-done:
-		if err == nil {
-			return nil
+	if done != nil {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case res, ok := <-done:
+			if ok && res.Err == nil {
+				log.Println("result from HTTP server")
+				_, err = cmd.Stdout.Write(res.Body)
+				return err
+			}
+			log.Printf("http error: %+v", res.Err)
 		}
-		log.Printf("http error: %+v", err)
 	}
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("%q: %w", cmd.Args, err)
