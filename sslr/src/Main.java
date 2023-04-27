@@ -117,7 +117,6 @@ public class Main implements HttpHandler {
     public static void main(final String[] args) {
         Main m = new Main();
         try {
-            System.out.println(args.length);
             if(args.length > 1 && args[0].equals("-port")) {
                 int port = Integer.parseInt(args[1]);
                 System.out.println("Listening on localhost:"+port);

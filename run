@@ -5,4 +5,5 @@ JAVA=java
 if [ -n "${JAVA_HOME:-}" ]; then
   JAVA="$JAVA_HOME/bin/java"
 fi
-exec "$JAVA" -cp "${dir}/sslr-plsql-toolkit-3.8.0.4948.jar:${dir}/out/production/sslr" sslr.Main "$@"
+exec "$JAVA" -cp "${dir}/sslr-plsql-toolkit-3.8.0.4948.jar:${dir}/commons-lang3-3.12.0.jar:${dir}/commons-text-1.10.0.jar:${dir}/out/production/sslr" sslr.Main "$@"
+

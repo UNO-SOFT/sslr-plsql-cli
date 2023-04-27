@@ -65,36 +65,8 @@ func Main() error {
 	if err != nil {
 		return err
 	}
-	stdin = io.NewSectionReader(sr, 0, sr.Size())
-	{
-		var invalid bool
-		r := io.NewSectionReader(sr, 0, sr.Size())
-		var a [4096]byte
-		for {
-			n, err := r.Read(a[:])
-			if n == 0 {
-				if err == io.EOF {
-					break
-				}
-				return err
-			}
-			b := a[:n]
-			for len(b) != 0 {
-				r, size := utf8.DecodeRune(b)
-				if size == 0 || r == utf8.RuneError {
-					invalid = true
-					break
-				}
-				b = b[size:]
-			}
-		}
-
-		if invalid {
-			log.Println("input is not valid UTF-8, try to convert from ISO8859-2")
-			if stdin, err = iohlp.MakeSectionReader(charmap.ISO8859_2.NewDecoder().Reader(io.NewSectionReader(sr, 0, sr.Size())), 1<<20); err != nil {
-				return err
-			}
-		}
+	if stdin, err = toUTF8(io.NewSectionReader(sr, 0, sr.Size())); err != nil {
+		return err
 	}
 
 	type result struct {
@@ -156,11 +128,7 @@ func Main() error {
 	if err = os.WriteFile(classFn, mainClass, 0640); err != nil {
 		return err
 	}
-	if false {
-		cmd := exec.CommandContext(ctx, "find", dn, "-ls")
-		cmd.Stdout = os.Stdout
-		cmd.Run()
-	}
+
 	var buf bytes.Buffer
 	cmd := exec.CommandContext(ctx, "java", "-cp", cp.String(), "sslr.Main")
 	cmd.Stdin = stdin
@@ -183,12 +151,17 @@ func Main() error {
 			return fmt.Errorf("%q: %w", cmd.Args, err)
 		}
 	}
-
-	if *flagXML {
-		_, err = os.Stdout.Write(buf.Bytes())
+	out, err := toUTF8(io.NewSectionReader(bytes.NewReader(buf.Bytes()), 0, int64(buf.Len())))
+	if err != nil {
 		return err
 	}
-	dec := xml.NewDecoder(bytes.NewReader(buf.Bytes()))
+
+	if *flagXML {
+		_, err = io.Copy(os.Stdout, out)
+		return err
+	}
+
+	dec := xml.NewDecoder(out)
 	dec.Strict = false
 	for {
 		tok, err := dec.Token()
@@ -218,4 +191,34 @@ func Main() error {
 		}
 	}
 	return nil
+}
+
+func toUTF8(sr *io.SectionReader) (*io.SectionReader, error) {
+	var invalid bool
+	r := io.NewSectionReader(sr, 0, sr.Size())
+	var a [4096]byte
+	for {
+		n, err := r.Read(a[:])
+		if n == 0 {
+			if err == io.EOF {
+				break
+			}
+			return sr, err
+		}
+		b := a[:n]
+		for len(b) != 0 {
+			r, size := utf8.DecodeRune(b)
+			if size == 0 || r == utf8.RuneError {
+				invalid = true
+				break
+			}
+			b = b[size:]
+		}
+	}
+
+	if !invalid {
+		return sr, nil
+	}
+	log.Println("not valid UTF-8, try to convert from ISO8859-2")
+	return iohlp.MakeSectionReader(charmap.ISO8859_2.NewDecoder().Reader(io.NewSectionReader(sr, 0, sr.Size())), 1<<20)
 }
