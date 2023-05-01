@@ -54,6 +54,7 @@ func Main() error {
 	flagServer := flag.String("server", "http://localhost:8003", "SSLR server")
 	flagXML := flag.Bool("xml", false, "output raw XML")
 	flagFormat := flag.String("format", "{{.FullName}}:{{.Begin}}:{{.End}}\n", "format to print")
+	flagLine := flag.Int("line", 0, "line number to get the function name")
 	flag.Var(&verbose, "v", "verbose logging")
 	flag.Parse()
 
@@ -175,6 +176,16 @@ func Main() error {
 	if err != nil {
 		return err
 	}
+
+	if line := *flagLine; line != 0 {
+		for _, f := range funcs {
+			if f.Begin <= line && line <= f.End {
+				fmt.Println(f.FullName())
+			}
+		}
+		return nil
+	}
+
 	defer os.Stdout.Close()
 	w := bufio.NewWriter(os.Stdout)
 	defer w.Flush()
