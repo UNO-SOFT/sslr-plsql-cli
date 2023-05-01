@@ -140,7 +140,7 @@ func Main() error {
 		case res, ok := <-done:
 			if ok && res.Err == nil {
 				log.Println("result from HTTP server")
-				buf.Write(res.Body)
+				// buf.Write(res.Body)
 			} else {
 				log.Printf("http error: %+v", res.Err)
 			}
@@ -163,6 +163,7 @@ func Main() error {
 
 	dec := xml.NewDecoder(out)
 	dec.Strict = false
+	var tagPath, funPath []string
 	for {
 		tok, err := dec.Token()
 		if err != nil {
@@ -172,8 +173,8 @@ func Main() error {
 			return err
 		}
 		type element struct {
-			Name, Value  string
-			Line, Column int
+			Name, Value, Parent string
+			Line, Column        int
 		}
 		if st, ok := tok.(xml.StartElement); ok {
 			elt := element{Name: st.Name.Local}
@@ -187,7 +188,26 @@ func Main() error {
 					elt.Column, _ = strconv.Atoi(a.Value)
 				}
 			}
+			tagPath = append(tagPath, elt.Name)
+			if !(elt.Name == "BIN_PROCEDURE" || elt.Name == "BIN_FUNCTION") {
+				continue
+			}
+			elt.Parent = strings.Join(funPath, "/")
+			i := len(tagPath) - 2
+			if len(tagPath) > 3 &&
+				(tagPath[i] == "PROCEDURE_HEADING" || tagPath[i] == "FUNCTION_HEADING") &&
+				(tagPath[i-1] == "PROCEDURE_DEFINITION" || tagPath[i-1] == "FUNCTION_DEFINITION") {
+				funPath = append(funPath, elt.Value)
+			} else {
+				log.Println(tagPath, "\n", tagPath[i-1:])
+			}
 			fmt.Println(elt)
+		} else if e, ok := tok.(xml.EndElement); ok {
+			tagPath = tagPath[:len(tagPath)-1]
+			if e.Name.Local == "PROCEDURE_DEFINITION" || e.Name.Local == "FUNCTION_DEFINITION" {
+				funPath = funPath[:len(funPath)-1]
+				//log.Println(level, funPath)
+			}
 		}
 	}
 	return nil
