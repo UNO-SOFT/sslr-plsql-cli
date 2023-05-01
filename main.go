@@ -20,6 +20,9 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/UNO-SOFT/zlog/v2"
+	//"golang.org/x/exp/slog"
+
 	"github.com/tgulacsi/go/iohlp"
 	"golang.org/x/text/encoding/charmap"
 )
@@ -34,6 +37,9 @@ var (
 
 	//go:embed out/production/sslr/sslr/Main.class
 	mainClass []byte
+
+	verbose zlog.VerboseVar
+	logger  = zlog.NewLogger(zlog.MaybeConsoleHandler(&verbose, os.Stderr)).SLog()
 )
 
 func main() {
@@ -45,6 +51,7 @@ func main() {
 func Main() error {
 	flagServer := flag.String("server", "http://localhost:8003", "SSLR server")
 	flagXML := flag.Bool("xml", false, "output raw XML")
+	flag.Var(&verbose, "v", "verbose logging")
 	flag.Parse()
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -161,56 +168,81 @@ func Main() error {
 		return err
 	}
 
+	funcs, err := GetFunctions(out)
+	fmt.Println(funcs)
+
+	return err
+}
+
+type Function struct {
+	Name              string
+	Parent            *Function
+	Begin, End, Level int
+}
+
+func GetFunctions(out io.Reader) ([]Function, error) {
+	var funcs []Function
+	m := make(map[string]*Function)
 	dec := xml.NewDecoder(out)
 	dec.Strict = false
 	var tagPath, funPath []string
+	var level, lastLine int
 	for {
 		tok, err := dec.Token()
 		if err != nil {
 			if err == io.EOF {
 				break
 			}
-			return err
-		}
-		type element struct {
-			Name, Value, Parent string
-			Line, Column        int
+			return funcs, err
 		}
 		if st, ok := tok.(xml.StartElement); ok {
-			elt := element{Name: st.Name.Local}
+			tagPath = append(tagPath, st.Name.Local)
+			if !(st.Name.Local == "BIN_PROCEDURE" || st.Name.Local == "BIN_FUNCTION") {
+				for _, a := range st.Attr {
+					if a.Name.Local == "tokenLine" {
+						lastLine, _ = strconv.Atoi(a.Value)
+						break
+					}
+				}
+				continue
+			}
+
+			f := Function{Level: level}
 			for _, a := range st.Attr {
 				switch a.Name.Local {
 				case "tokenValue":
-					elt.Value = a.Value
+					f.Name = a.Value
 				case "tokenLine":
-					elt.Line, _ = strconv.Atoi(a.Value)
-				case "tokenColumn":
-					elt.Column, _ = strconv.Atoi(a.Value)
+					f.Begin, _ = strconv.Atoi(a.Value)
 				}
 			}
-			tagPath = append(tagPath, elt.Name)
-			if !(elt.Name == "BIN_PROCEDURE" || elt.Name == "BIN_FUNCTION") {
-				continue
-			}
-			elt.Parent = strings.Join(funPath, "/")
+			f.Parent = m[strings.Join(funPath, ".")]
 			i := len(tagPath) - 2
 			if len(tagPath) > 3 &&
 				(tagPath[i] == "PROCEDURE_HEADING" || tagPath[i] == "FUNCTION_HEADING") &&
 				(tagPath[i-1] == "PROCEDURE_DEFINITION" || tagPath[i-1] == "FUNCTION_DEFINITION") {
-				funPath = append(funPath, elt.Value)
+				level++
+				funPath = append(funPath, f.Name)
+				m[strings.Join(funPath, ".")] = &f
 			} else {
 				log.Println(tagPath, "\n", tagPath[i-1:])
 			}
-			fmt.Println(elt)
+			if i := len(funcs) - 1; i >= 0 && funcs[i].End == 0 && funcs[i].Level == f.Level {
+				funcs[i].End = f.Begin - 1
+			}
+			funcs = append(funcs, f)
 		} else if e, ok := tok.(xml.EndElement); ok {
 			tagPath = tagPath[:len(tagPath)-1]
 			if e.Name.Local == "PROCEDURE_DEFINITION" || e.Name.Local == "FUNCTION_DEFINITION" {
 				funPath = funPath[:len(funPath)-1]
-				//log.Println(level, funPath)
+				level--
 			}
 		}
 	}
-	return nil
+	if i := len(funcs) - 1; i >= 0 && lastLine != 0 && funcs[i].End == 0 {
+		funcs[i].End = lastLine
+	}
+	return funcs, nil
 }
 
 func toUTF8(sr *io.SectionReader) (*io.SectionReader, error) {
