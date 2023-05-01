@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	_ "embed"
@@ -18,6 +19,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"text/template"
 	"unicode/utf8"
 
 	"github.com/UNO-SOFT/zlog/v2"
@@ -51,6 +53,7 @@ func main() {
 func Main() error {
 	flagServer := flag.String("server", "http://localhost:8003", "SSLR server")
 	flagXML := flag.Bool("xml", false, "output raw XML")
+	flagFormat := flag.String("format", "{{.FullName}}:{{.Begin}}:{{.End}}\n", "format to print")
 	flag.Var(&verbose, "v", "verbose logging")
 	flag.Parse()
 
@@ -169,15 +172,44 @@ func Main() error {
 	}
 
 	funcs, err := GetFunctions(out)
-	fmt.Println(funcs)
+	if err != nil {
+		return err
+	}
+	defer os.Stdout.Close()
+	w := bufio.NewWriter(os.Stdout)
+	defer w.Flush()
+	tmpl := template.Must(template.New("").Parse(*flagFormat))
+	for _, f := range funcs {
+		if err = tmpl.Execute(w, f); err != nil {
+			return err
+		}
+	}
 
-	return err
+	return nil
 }
 
 type Function struct {
 	Name              string
 	Parent            *Function
 	Begin, End, Level int
+}
+
+func (f Function) FullName() string {
+	names := append(make([]string, 0, 2), f.Name)
+	for p := f.Parent; p != nil; p = p.Parent {
+		names = append(names, p.Name)
+	}
+	if len(names) == 1 {
+		return names[0]
+	}
+	var buf strings.Builder
+	for i := len(names) - 1; i >= 0; i-- {
+		if buf.Len() != 0 {
+			buf.WriteByte('.')
+		}
+		buf.WriteString(names[i])
+	}
+	return buf.String()
 }
 
 func GetFunctions(out io.Reader) ([]Function, error) {
@@ -224,10 +256,8 @@ func GetFunctions(out io.Reader) ([]Function, error) {
 				level++
 				funPath = append(funPath, f.Name)
 				m[strings.Join(funPath, ".")] = &f
-			} else {
-				log.Println(tagPath, "\n", tagPath[i-1:])
 			}
-			if i := len(funcs) - 1; i >= 0 && funcs[i].End == 0 && funcs[i].Level == f.Level {
+			if i := len(funcs) - 1; i >= 0 && funcs[i].End == 0 && funcs[i].Level >= f.Level {
 				funcs[i].End = f.Begin - 1
 			}
 			funcs = append(funcs, f)
