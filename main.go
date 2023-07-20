@@ -53,7 +53,7 @@ func main() {
 func Main() error {
 	flagServer := flag.String("server", "http://localhost:8003", "SSLR server")
 	flagXML := flag.Bool("xml", false, "output raw XML")
-	flagFormat := flag.String("format", "{{.FullName}}:{{.Begin}}:{{.End}}\n", "format to print")
+	flagFormat := flag.String("format", "{{.FullName}}:{{.Begin}}:{{.End}}\t{{range .Calls}}{{.Other}},{{end}}\n", "format to print")
 	flagLine := flag.Int("line", 0, "line number to get the function name")
 	flag.Var(&verbose, "v", "verbose logging")
 	flag.Parse()
@@ -199,8 +199,15 @@ func Main() error {
 	return nil
 }
 
+type Call struct {
+	Other     string
+	Line      int
+	Procedure bool
+}
+
 type Function struct {
 	Name              string
+	Calls             []Call
 	Parent            *Function
 	Begin, End, Level int
 }
@@ -228,8 +235,9 @@ func GetFunctions(out io.Reader) ([]Function, error) {
 	m := make(map[string]*Function)
 	dec := xml.NewDecoder(out)
 	dec.Strict = false
-	var tagPath, funPath []string
-	var level, lastLine int
+	var tagPath, funPath, identifiers []string
+	var level, line, lastLine, callLine int
+	var act *Function
 	for {
 		tok, err := dec.Token()
 		if err != nil {
@@ -239,44 +247,73 @@ func GetFunctions(out io.Reader) ([]Function, error) {
 			return funcs, err
 		}
 		if st, ok := tok.(xml.StartElement); ok {
-			tagPath = append(tagPath, st.Name.Local)
-			if !(st.Name.Local == "BIN_PROCEDURE" || st.Name.Local == "BIN_FUNCTION") {
-				for _, a := range st.Attr {
-					if a.Name.Local == "tokenLine" {
-						lastLine, _ = strconv.Atoi(a.Value)
-						break
-					}
+			for _, a := range st.Attr {
+				if a.Name.Local == "tokenLine" {
+					line, _ = strconv.Atoi(a.Value)
+					break
 				}
-				continue
 			}
 
-			f := Function{Level: level}
-			for _, a := range st.Attr {
-				switch a.Name.Local {
-				case "tokenValue":
-					f.Name = a.Value
-				case "tokenLine":
-					f.Begin, _ = strconv.Atoi(a.Value)
+			switch st.Name.Local {
+
+			case "BIN_PROCEDURE", "BIN_FUNCTION":
+				f := Function{Level: level}
+				for _, a := range st.Attr {
+					switch a.Name.Local {
+					case "tokenValue":
+						f.Name = a.Value
+					case "tokenLine":
+						f.Begin, _ = strconv.Atoi(a.Value)
+					}
+				}
+				f.Parent = m[strings.Join(funPath, ".")]
+				i := len(tagPath) - 1
+				if len(tagPath) > 3 &&
+					(tagPath[i] == "PROCEDURE_HEADING" || tagPath[i] == "FUNCTION_HEADING") &&
+					(tagPath[i-1] == "PROCEDURE_DEFINITION" || tagPath[i-1] == "FUNCTION_DEFINITION") {
+					level++
+					funPath = append(funPath, f.Name)
+					m[strings.Join(funPath, ".")] = &f
+				}
+				if i := len(funcs) - 1; i >= 0 && funcs[i].End == 0 && funcs[i].Level >= f.Level {
+					funcs[i].End = f.Begin - 1
+				}
+				funcs = append(funcs, f)
+				act = &funcs[len(funcs)-1]
+
+			case "PROCEDURE_CALL":
+				callLine = line
+
+			case "BIN_IDENTIFIER":
+				if p := tagPath[len(tagPath)-1]; p == "PROCEDURE_CALL" || p == "EXPRESSION_PRIMARY" {
+					for _, a := range st.Attr {
+						if a.Name.Local == "tokenValue" {
+							identifiers = append(identifiers, a.Value)
+							break
+						}
+					}
 				}
 			}
-			f.Parent = m[strings.Join(funPath, ".")]
-			i := len(tagPath) - 2
-			if len(tagPath) > 3 &&
-				(tagPath[i] == "PROCEDURE_HEADING" || tagPath[i] == "FUNCTION_HEADING") &&
-				(tagPath[i-1] == "PROCEDURE_DEFINITION" || tagPath[i-1] == "FUNCTION_DEFINITION") {
-				level++
-				funPath = append(funPath, f.Name)
-				m[strings.Join(funPath, ".")] = &f
-			}
-			if i := len(funcs) - 1; i >= 0 && funcs[i].End == 0 && funcs[i].Level >= f.Level {
-				funcs[i].End = f.Begin - 1
-			}
-			funcs = append(funcs, f)
+
+			lastLine = line
+			tagPath = append(tagPath, st.Name.Local)
+
 		} else if e, ok := tok.(xml.EndElement); ok {
 			tagPath = tagPath[:len(tagPath)-1]
-			if e.Name.Local == "PROCEDURE_DEFINITION" || e.Name.Local == "FUNCTION_DEFINITION" {
+
+			switch e.Name.Local {
+			case "PROCEDURE_DEFINITION", "FUNCTION_DEFINITION":
 				funPath = funPath[:len(funPath)-1]
 				level--
+
+			case "PROCEDURE_CALL", "EXPRESSION_PRIMARY", "PAREN_L":
+				if len(identifiers) != 0 {
+					if act != nil {
+						act.Calls = append(act.Calls, Call{Line: callLine, Other: strings.Join(identifiers, "."), Procedure: e.Name.Local == "PROCEDURE_CALL"})
+					}
+					identifiers = identifiers[:0]
+				}
+
 			}
 		}
 	}
