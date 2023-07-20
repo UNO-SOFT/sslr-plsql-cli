@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"database/sql"
 	_ "embed"
 	"encoding/xml"
 	"flag"
@@ -26,7 +27,10 @@ import (
 	//"golang.org/x/exp/slog"
 
 	"github.com/tgulacsi/go/iohlp"
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/text/encoding/charmap"
+
+	"github.com/godror/godror"
 )
 
 var (
@@ -55,6 +59,7 @@ func Main() error {
 	flagXML := flag.Bool("xml", false, "output raw XML")
 	flagFormat := flag.String("format", "{{.FullName}}:{{.Begin}}:{{.End}}\t{{range .Calls}}{{.Other}},{{end}}\n", "format to print")
 	flagLine := flag.Int("line", 0, "line number to get the function name")
+	flagConnect := flag.String("connect", os.Getenv("BRUNO_OWNER_ID"), "connect to this database to get function/procedure names")
 	flag.Var(&verbose, "v", "verbose logging")
 	flag.Parse()
 
@@ -150,10 +155,10 @@ func Main() error {
 			return ctx.Err()
 		case res, ok := <-done:
 			if ok && res.Err == nil {
-				log.Println("result from HTTP server")
+				logger.Info("result from HTTP server")
 				// buf.Write(res.Body)
 			} else {
-				log.Printf("http error: %+v", res.Err)
+				logger.Error("http", "error", res.Err)
 			}
 		}
 	}
@@ -172,9 +177,74 @@ func Main() error {
 		return err
 	}
 
-	funcs, err := GetFunctions(out)
-	if err != nil {
+	var grp errgroup.Group
+
+	var name string
+	var funcs []Function
+	grp.Go(func() error {
+		var err error
+		name, funcs, err = GetFunctions(out)
 		return err
+	})
+	var procedures map[string][2]string
+	if *flagConnect != "" {
+		grp.Go(func() error {
+			db, err := sql.Open("godror", *flagConnect)
+			if err != nil {
+				logger.Warn("connect to database", "dsn", *flagConnect, "error", err)
+				return nil
+			}
+			defer db.Close()
+			const qry = "SELECT NVL2(procedure_name, object_name, NULL) AS package_name, NVL(procedure_name, object_name) AS procedure_name FROM user_procedures"
+			rows, err := db.QueryContext(ctx, qry, godror.FetchArraySize(4<<10), godror.PrefetchCount(4<<10+1))
+			if err != nil {
+				return fmt.Errorf("%s: %w", qry, err)
+			}
+			defer rows.Close()
+			procedures = make(map[string][2]string)
+			for rows.Next() {
+				var pkg, proc string
+				if err := rows.Scan(&pkg, &proc); err != nil {
+					return fmt.Errorf("scan %q: %w", qry, err)
+				}
+				k := proc
+				if pkg != "" {
+					k = pkg + "." + proc
+				}
+				procedures[k] = [2]string{pkg, proc}
+			}
+			return rows.Err()
+		})
+	}
+	if err := grp.Wait(); err != nil {
+		return err
+	}
+	for _, f := range funcs {
+		procedures[name+"."+f.FullName()] = [2]string{name, f.FullName()}
+	}
+
+	for i := range funcs {
+		f := &funcs[i]
+		for j := 0; j < len(f.Calls); j++ {
+			c := &f.Calls[j]
+			if c.Procedure && !strings.HasSuffix(c.Other, ".DELETE") {
+				continue
+			}
+			k := c.Other
+			if strings.IndexByte(k, '.') < 0 {
+				if _, ok := procedures[k]; ok {
+					continue
+				}
+				k = name + "." + k
+			}
+			if _, ok := procedures[k]; ok {
+				c.Other = k
+			} else {
+				f.Calls[j] = f.Calls[len(f.Calls)-1]
+				f.Calls = f.Calls[:len(f.Calls)-1]
+				j--
+			}
+		}
 	}
 
 	if line := *flagLine; line != 0 {
@@ -230,8 +300,7 @@ func (f Function) FullName() string {
 	return buf.String()
 }
 
-func GetFunctions(out io.Reader) ([]Function, error) {
-	var funcs []Function
+func GetFunctions(out io.Reader) (this string, funcs []Function, _ error) {
 	m := make(map[string]*Function)
 	dec := xml.NewDecoder(out)
 	dec.Strict = false
@@ -244,28 +313,30 @@ func GetFunctions(out io.Reader) ([]Function, error) {
 			if err == io.EOF {
 				break
 			}
-			return funcs, err
+			return this, funcs, err
 		}
+
 		if st, ok := tok.(xml.StartElement); ok {
+			var tokenValue string
 			for _, a := range st.Attr {
 				if a.Name.Local == "tokenLine" {
 					line, _ = strconv.Atoi(a.Value)
-					break
+				} else if a.Name.Local == "tokenValue" {
+					tokenValue = a.Value
 				}
 			}
 
 			switch st.Name.Local {
+			case "BIN_PACKAGE":
+				this = tokenValue
 
 			case "BIN_PROCEDURE", "BIN_FUNCTION":
-				f := Function{Level: level}
-				for _, a := range st.Attr {
-					switch a.Name.Local {
-					case "tokenValue":
-						f.Name = a.Value
-					case "tokenLine":
-						f.Begin, _ = strconv.Atoi(a.Value)
-					}
+				if this == "" {
+					this = tokenValue
 				}
+				f := Function{Level: level}
+				f.Name = tokenValue
+				f.Begin = line
 				f.Parent = m[strings.Join(funPath, ".")]
 				i := len(tagPath) - 1
 				if len(tagPath) > 3 &&
@@ -286,12 +357,7 @@ func GetFunctions(out io.Reader) ([]Function, error) {
 
 			case "BIN_IDENTIFIER":
 				if p := tagPath[len(tagPath)-1]; p == "PROCEDURE_CALL" || p == "EXPRESSION_PRIMARY" {
-					for _, a := range st.Attr {
-						if a.Name.Local == "tokenValue" {
-							identifiers = append(identifiers, a.Value)
-							break
-						}
-					}
+					identifiers = append(identifiers, tokenValue)
 				}
 			}
 
@@ -309,7 +375,11 @@ func GetFunctions(out io.Reader) ([]Function, error) {
 			case "PROCEDURE_CALL", "EXPRESSION_PRIMARY", "PAREN_L":
 				if len(identifiers) != 0 {
 					if act != nil {
-						act.Calls = append(act.Calls, Call{Line: callLine, Other: strings.Join(identifiers, "."), Procedure: e.Name.Local == "PROCEDURE_CALL"})
+						act.Calls = append(act.Calls, Call{
+							Line:      callLine,
+							Other:     strings.Join(identifiers, "."),
+							Procedure: e.Name.Local == "PROCEDURE_CALL",
+						})
 					}
 					identifiers = identifiers[:0]
 				}
@@ -320,7 +390,7 @@ func GetFunctions(out io.Reader) ([]Function, error) {
 	if i := len(funcs) - 1; i >= 0 && lastLine != 0 && funcs[i].End == 0 {
 		funcs[i].End = lastLine
 	}
-	return funcs, nil
+	return this, funcs, nil
 }
 
 func toUTF8(sr *io.SectionReader) (*io.SectionReader, error) {
@@ -349,6 +419,6 @@ func toUTF8(sr *io.SectionReader) (*io.SectionReader, error) {
 	if !invalid {
 		return sr, nil
 	}
-	log.Println("not valid UTF-8, try to convert from ISO8859-2")
+	logger.Info("not valid UTF-8, try to convert from ISO8859-2")
 	return iohlp.MakeSectionReader(charmap.ISO8859_2.NewDecoder().Reader(io.NewSectionReader(sr, 0, sr.Size())), 1<<20)
 }
