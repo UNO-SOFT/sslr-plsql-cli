@@ -12,15 +12,17 @@ message Object {
 
 message Function {
 	string Name = 1;
-	string Parent = 2; 
-  uint32 Begin = 3;
-  uint32 End = 4;
-  uint32 Level = 5;
-  repeated Call Calls = 6;
+	string Type = 2;
+	string Parent = 3; 
+  uint32 Begin = 4;
+  uint32 End = 5;
+  uint32 Level = 6;
+  repeated Call Calls = 7;
 }
 
 message Call {
   string Other = 1;
   uint32 Line  = 2;
   bool   Procedure = 3;
+	string Type = 4;
 }
