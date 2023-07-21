@@ -188,7 +188,8 @@ func Main() error {
 			pbf := pb.Function{
 				Name:  f.FullName(),
 				Calls: make([]*pb.Call, 0, len(f.Calls)),
-				Begin: uint32(f.Begin), End: uint32(f.End), Level: uint32(f.Level),
+				Begin: uint32(f.Begin), End: uint32(f.End),
+				Level: uint32(f.Level),
 			}
 			if f.Parent != nil {
 				pbf.Parent = f.Parent.FullName()
