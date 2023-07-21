@@ -56,7 +56,7 @@ func main() {
 }
 
 func Main() error {
-	flagServer := flag.String("server", "http://localhost:8003", "SSLR server")
+	flagServer := flag.String("server", "http://localhost:7003", "SSLR server")
 	flagXML := flag.Bool("xml", false, "output raw XML")
 	flagPB := flag.Bool("pb", false, "output protobuf")
 	flagFormat := flag.String("format", "{{.FullName}}:{{.Begin}}:{{.End}}\t{{range .Calls}}{{.Other}},{{end}}\n", "format to print")
