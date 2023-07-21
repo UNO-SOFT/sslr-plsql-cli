@@ -1,0 +1,26 @@
+// Copyright 2021 Tamás Gulácsi. All rights reserved.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+option go_package = "github.com/UNO-SOFT/sslr-plsql-cli/pb";
+
+message Object {
+	string Name = 1;	
+	repeated Function Functions = 2;
+}
+
+message Function {
+	string Name = 1;
+	string Parent = 2; 
+  uint32 Begin = 3;
+  uint32 End = 4;
+  uint32 Level = 5;
+  repeated Call Calls = 6;
+}
+
+message Call {
+  string Other = 1;
+  uint32 Line  = 2;
+  bool   Procedure = 3;
+}

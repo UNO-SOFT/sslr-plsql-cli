@@ -6,7 +6,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"database/sql"
 	_ "embed"
 	"encoding/xml"
 	"flag"
@@ -23,15 +22,17 @@ import (
 	"text/template"
 	"unicode/utf8"
 
-	"github.com/UNO-SOFT/zlog/v2"
-	//"golang.org/x/exp/slog"
-
-	"github.com/tgulacsi/go/iohlp"
-	"golang.org/x/sync/errgroup"
 	"golang.org/x/text/encoding/charmap"
+	"google.golang.org/protobuf/proto"
 
-	"github.com/godror/godror"
+	"github.com/UNO-SOFT/sslr-plsql-cli/pb"
+	"github.com/tgulacsi/go/iohlp"
+
+	"github.com/UNO-SOFT/zlog/v2"
 )
+
+//go:generate go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+//go:generate protoc --proto_path=pb --go_out=pb --go_opt=paths=source_relative pb/functions.proto
 
 var (
 	//go:embed sslr-plsql-toolkit-3.8.0.4948.jar
@@ -57,9 +58,9 @@ func main() {
 func Main() error {
 	flagServer := flag.String("server", "http://localhost:8003", "SSLR server")
 	flagXML := flag.Bool("xml", false, "output raw XML")
+	flagPB := flag.Bool("pb", false, "output protobuf")
 	flagFormat := flag.String("format", "{{.FullName}}:{{.Begin}}:{{.End}}\t{{range .Calls}}{{.Other}},{{end}}\n", "format to print")
 	flagLine := flag.Int("line", 0, "line number to get the function name")
-	flagConnect := flag.String("connect", os.Getenv("BRUNO_OWNER_ID"), "connect to this database to get function/procedure names")
 	flag.Var(&verbose, "v", "verbose logging")
 	flag.Parse()
 
@@ -177,74 +178,37 @@ func Main() error {
 		return err
 	}
 
-	var grp errgroup.Group
-
-	var name string
-	var funcs []Function
-	grp.Go(func() error {
-		var err error
-		name, funcs, err = GetFunctions(out)
-		return err
-	})
-	var procedures map[string][2]string
-	if *flagConnect != "" {
-		grp.Go(func() error {
-			db, err := sql.Open("godror", *flagConnect)
-			if err != nil {
-				logger.Warn("connect to database", "dsn", *flagConnect, "error", err)
-				return nil
-			}
-			defer db.Close()
-			const qry = "SELECT NVL2(procedure_name, object_name, NULL) AS package_name, NVL(procedure_name, object_name) AS procedure_name FROM user_procedures"
-			rows, err := db.QueryContext(ctx, qry, godror.FetchArraySize(4<<10), godror.PrefetchCount(4<<10+1))
-			if err != nil {
-				return fmt.Errorf("%s: %w", qry, err)
-			}
-			defer rows.Close()
-			procedures = make(map[string][2]string)
-			for rows.Next() {
-				var pkg, proc string
-				if err := rows.Scan(&pkg, &proc); err != nil {
-					return fmt.Errorf("scan %q: %w", qry, err)
-				}
-				k := proc
-				if pkg != "" {
-					k = pkg + "." + proc
-				}
-				procedures[k] = [2]string{pkg, proc}
-			}
-			return rows.Err()
-		})
-	}
-	if err := grp.Wait(); err != nil {
+	name, funcs, err := GetFunctions(out)
+	if err != nil {
 		return err
 	}
-	for _, f := range funcs {
-		procedures[name+"."+f.FullName()] = [2]string{name, f.FullName()}
-	}
+	if *flagPB {
+		obj := pb.Object{Name: name, Functions: make([]*pb.Function, 0, len(funcs))}
+		for _, f := range funcs {
+			pbf := pb.Function{
+				Name:  f.FullName(),
+				Calls: make([]*pb.Call, 0, len(f.Calls)),
+				Begin: uint32(f.Begin), End: uint32(f.End), Level: uint32(f.Level),
+			}
+			if f.Parent != nil {
+				pbf.Parent = f.Parent.FullName()
+			}
+			for _, c := range f.Calls {
+				pbf.Calls = append(pbf.Calls, &pb.Call{
+					Other: c.Other, Line: uint32(c.Line),
+					Procedure: c.Procedure,
+				})
+			}
 
-	for i := range funcs {
-		f := &funcs[i]
-		for j := 0; j < len(f.Calls); j++ {
-			c := &f.Calls[j]
-			if c.Procedure && !strings.HasSuffix(c.Other, ".DELETE") {
-				continue
-			}
-			k := c.Other
-			if strings.IndexByte(k, '.') < 0 {
-				if _, ok := procedures[k]; ok {
-					continue
-				}
-				k = name + "." + k
-			}
-			if _, ok := procedures[k]; ok {
-				c.Other = k
-			} else {
-				f.Calls[j] = f.Calls[len(f.Calls)-1]
-				f.Calls = f.Calls[:len(f.Calls)-1]
-				j--
-			}
+			obj.Functions = append(obj.Functions, &pbf)
 		}
+		b, err := proto.Marshal(&obj)
+		if err != nil {
+			return err
+		}
+		_, err = os.Stdout.Write(b)
+		os.Stdout.Close()
+		return err
 	}
 
 	if line := *flagLine; line != 0 {

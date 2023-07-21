@@ -11,6 +11,7 @@ require (
 )
 
 require (
+	github.com/cayleygraph/quad v1.2.4 // indirect
 	github.com/dgryski/go-linebreak v0.0.0-20180812204043-d8f37254e7d3 // indirect
 	github.com/go-logfmt/logfmt v0.6.0 // indirect
 	github.com/go-logr/logr v1.2.3 // indirect
