@@ -5,7 +5,7 @@ go 1.21
 toolchain go1.21.0
 
 require (
-	github.com/UNO-SOFT/zlog v0.7.6
+	github.com/UNO-SOFT/zlog v0.7.7
 	github.com/tgulacsi/go v0.24.4
 	golang.org/x/text v0.9.0
 	google.golang.org/protobuf v1.28.1
